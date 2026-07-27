@@ -4537,6 +4537,52 @@ class TestRunConversation:
         assert result["final_response"] == "Got it"
         assert result["completed"] is True
         assert result["api_calls"] == 2
+    
+    # def test_shell_alias_repaired_in_conversation_take1(self, agent):
+    #     """Model calls 'shell', agent repairs it to 'terminal' via alias."""
+    #     self._setup_agent(agent)
+    #     agent.valid_tool_names = {"web_search", "terminal"}
+    #     bad_tc = _mock_tool_call(name="shell", arguments="{}", call_id="c1")
+    #     resp_bad = _mock_response(
+    #         content="", finish_reason="tool_calls", tool_calls=[bad_tc]
+    #     )
+    #     resp_good = _mock_response(content="Done", finish_reason="stop")
+    #     agent.client.chat.completions.create.side_effect = [resp_bad, resp_good]
+    #     with (
+    #         patch.object(agent, "_persist_session"),
+    #         patch.object(agent, "_save_trajectory"),
+    #         patch.object(agent, "_cleanup_task_resources"),
+    #         patch("run_agent.handle_function_call", return_value="command output"),
+    #     ):
+    #         result = agent.run_conversation("run a command")
+    #     assert result["final_response"] == "Done"
+    #     assert result["completed"] is True
+    #     assert result["api_calls"] == 2
+
+    def test_shell_alias_repaired_in_conversation(self, agent):
+        """Model calls 'shell', agent repairs it to 'terminal' via alias."""
+        self._setup_agent(agent)
+        agent.valid_tool_names = {"web_search", "terminal"}
+        bad_tc = _mock_tool_call(name="shell", arguments="{}", call_id="c1")
+        resp_bad = _mock_response(
+            content="", finish_reason="tool_calls", tool_calls=[bad_tc]
+        )
+        resp_good = _mock_response(content="Done", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [resp_bad, resp_good]
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.handle_function_call", return_value="command output") as mock_hfc,
+        ):
+            result = agent.run_conversation("run a command")
+        # The repair must have changed "shell" -> "terminal" and dispatched it.
+        mock_hfc.assert_called_once()
+        called_name = mock_hfc.call_args[0][0]
+        assert called_name == "terminal"
+        assert result["final_response"] == "Done"
+        assert result["completed"] is True
+        assert result["api_calls"] == 2
 
     def test_reasoning_only_local_resumed_no_compression_triggered(self, agent):
         """Reasoning-only responses no longer trigger compression — prefill then accepted."""
