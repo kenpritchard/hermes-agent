@@ -119,6 +119,49 @@ class TestEdgeCases:
         assert repair("ThisIsNotRemotelyARealToolName_tool") is None
 
 
+class TestStaticAliases:
+    """Semantic synonyms that structural / fuzzy passes can't catch.
+
+    Small models (observed: Poolside Laguna XS 2.1 on WSL/Linux) sometimes
+    call ``shell`` instead of ``terminal``.  The structural normalizers
+    (lowercase, snake_case, suffix-strip) and fuzzy match (difflib at 0.7)
+    all fail because the two names share almost no characters.  A static
+    alias map slots in before the fuzzy match to cover this gap.
+    """
+
+    def test_shell_aliases_to_terminal(self, repair):
+        assert repair("shell") == "terminal"
+
+    def test_shell_alias_case_insensitive(self, repair):
+        assert repair("SHELL") == "terminal"
+        assert repair("Shell") == "terminal"
+
+    def test_shell_alias_yields_when_shell_is_real_tool(self, repair):
+        # If an MCP server registers a tool literally named 'shell',
+        # the alias must NOT redirect it to 'terminal'.
+        from types import SimpleNamespace
+        from run_agent import AIAgent
+        stub = SimpleNamespace(valid_tool_names=VALID | {"shell"})
+        repair_with_shell = AIAgent._repair_tool_call.__get__(stub, AIAgent)
+        assert repair_with_shell("shell") == "shell"
+
+    def test_user_defined_alias_from_config(self, repair):
+        # A user-defined alias in config.yaml (e.g. browse -> browser_navigate)
+        # fires when the hallucinated name is not a registered tool.
+        from unittest.mock import patch
+        custom_config = {"agent": {"tool_aliases": {"browse": "browser_navigate"}}}
+        with patch("hermes_cli.config.load_config", return_value=custom_config):
+            assert repair("browse") == "browser_navigate"
+
+    def test_user_override_of_shell_wins(self, repair):
+        # A user can override the built-in default (shell -> terminal)
+        # by mapping shell to a different valid tool (e.g. execute_code).
+        from unittest.mock import patch
+        custom_config = {"agent": {"tool_aliases": {"shell": "execute_code"}}}
+        with patch("hermes_cli.config.load_config", return_value=custom_config):
+            assert repair("shell") == "execute_code"
+
+
 class TestVolcEngineXmlPollution:
     """Regression coverage for #33007 — VolcEngine ``api/plan`` endpoint
     leaks raw XML attribute fragments into ``tool_use.name``.

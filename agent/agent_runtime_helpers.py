@@ -2670,7 +2670,7 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
 
     Models sometimes emit variants of a tool name that differ only
     in casing, separators, or class-like suffixes. Normalize
-    aggressively before falling back to fuzzy match:
+    aggressively and check for aliases before falling back to fuzzy match:
 
     1. Lowercase direct match.
     2. Lowercase + hyphens/spaces -> underscores.
@@ -2679,7 +2679,9 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
        Claude-style models sometimes tack on (TodoTool_tool ->
        TodoTool -> Todo -> todo). Applied twice so double-tacked
        suffixes like ``TodoTool_tool`` reduce all the way.
-    5. Fuzzy match (difflib, cutoff=0.7).
+    5. Check config-driven tool-name aliases (semantic synonyms that
+       structural and fuzzy passes can't catch).
+    6. Fuzzy match (difflib, cutoff=0.7).
 
     See #14784 for the original reports (TodoTool_tool, Patch_tool,
     BrowserClick_tool were all returning "Unknown tool" before).
@@ -2750,6 +2752,24 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     for c in cands:
         if c and c in agent.valid_tool_names:
             return c
+
+    # Config-driven tool-name aliases — semantic synonyms that structural
+    # and fuzzy passes can't catch.  Read from agent.tool_aliases in
+    # config.yaml (with a built-in default for shell→terminal).  Only fires
+    # when the hallucinated name is NOT itself a registered tool.
+    from hermes_cli.config import load_config as _load_config
+    try:
+        _cfg = _load_config() or {}
+        _aliases = _cfg.get("agent", {}).get("tool_aliases", {})
+    except Exception:
+        _aliases = {}
+    if not isinstance(_aliases, dict):
+        _aliases = {}
+    if lowered in _aliases:
+        aliased = _aliases[lowered]
+        if aliased in agent.valid_tool_names and lowered not in agent.valid_tool_names:
+            logger.info("Returning aliased tool name %r -> alias %r", lowered, aliased)
+            return aliased
 
     # Fuzzy match as last resort.
     matches = get_close_matches(lowered, agent.valid_tool_names, n=1, cutoff=0.7)

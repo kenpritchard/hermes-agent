@@ -1437,6 +1437,16 @@ agent:
   tool_use_enforcement: ["gpt", "codex", "gemini", "grok", "my-custom-model"]
 ```
 
+## Tool Aliases
+
+Some models will make a tool call for a non-existent tool. If you find this happens frequently, you can add an alias for the correct tool name. Only fires when the hallucinated name is NOT itself a registered tool (so an MCP server registering "shell" takes priority). The aliases map erroneous names to currently available registered tool names; built-in default is shell: terminal; edit config.yaml directly for multi-alias changes (since hermes config set emits a misleading "not a recognized config key" warning for dynamic alias keys).
+
+```yaml
+agent:
+  tool_aliases:
+    shell: terminal
+```
+
 ## Tool-Loop Guardrails
 
 Hermes detects when the agent is stuck in an unproductive tool-calling loop — the same tool call failing repeatedly, the same tool failing over and over, or an idempotent call returning the same result with no progress. By default it injects a **warning** into the tool result so the model self-corrects; it does not hard-stop, since a person watching the CLI/TUI can intervene.

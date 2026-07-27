@@ -1015,6 +1015,14 @@ DEFAULT_CONFIG = {
         # compounds over a long conversation.  Costs ~70 tokens in the cached
         # system prompt.  Set False to disable globally.
         "parallel_tool_call_guidance": True,
+        # Tool-name aliases — semantic synonyms that the repair pipeline
+        # can't catch structurally (lowercase, snake_case, suffix-strip) or
+        # via fuzzy match.  Maps hallucinated names to real tool names.
+        # Only fires when the hallucinated name is NOT itself a registered
+        # tool (so an MCP server registering "shell" takes priority).
+        "tool_aliases": {
+            "shell": "terminal",
+        },
         # Local-environment toolchain probe — surfaces Python/pip/uv/PEP-668
         # state in the system prompt when something non-default is detected
         # (e.g. python3 has no pip module, pip→python version mismatch, PEP

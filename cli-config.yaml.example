@@ -783,6 +783,14 @@ agent:
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
   max_turns: 500
 
+  # Tool-name aliases — semantic synonyms that the repair pipeline
+  # can't catch structurally (lowercase, snake_case, suffix-strip) or
+  # via fuzzy match.  Maps hallucinated names to real tool names.
+  # Only fires when the hallucinated name is NOT itself a registered
+  # tool (so an MCP server registering "shell" takes priority).
+  # tool_aliases:
+  #   shell: terminal
+
   # Inactivity timeout for gateway agent runs (seconds, 0 = unlimited).
   # The agent can run indefinitely when actively calling tools or receiving
   # API responses.  Only fires after the agent has been idle for this duration.
