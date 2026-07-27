@@ -3,6 +3,7 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tree/store'
 import { getSession, getSessionMessages, type SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
@@ -55,6 +56,12 @@ vi.mock('@/store/profile', async importOriginal => ({
   ensureGatewayProfile: vi.fn().mockResolvedValue(undefined)
 }))
 
+vi.mock('@/components/pane-shell/tree/store', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  noteActiveTreeGroup: vi.fn(),
+  revealTreePane: vi.fn()
+}))
+
 const RUNTIME_SESSION_ID = 'rt-new-001'
 
 function deferred<T>() {
@@ -69,7 +76,7 @@ function deferred<T>() {
 
 type HarnessHandle = Pick<
   ReturnType<typeof useSessionActions>,
-  'createBackendSessionForSend' | 'startFreshSessionDraft'
+  'createBackendSessionForSend' | 'selectSidebarItem' | 'startFreshSessionDraft'
 >
 
 function storedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -1097,9 +1104,11 @@ describe('branchStoredSession desktop source tagging', () => {
 
   it('branches an open live chat via session.branch with a trimmed message count (bug #1/#3 fix)', async () => {
     let branchParams: Record<string, unknown> | undefined
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.branch') {
         branchParams = params
+
         return {
           session_id: 'branch-runtime',
           stored_session_id: 'branch-stored',
@@ -1109,6 +1118,7 @@ describe('branchStoredSession desktop source tagging', () => {
           info: {}
         } as never
       }
+
       return {} as never
     })
 
@@ -1130,7 +1140,7 @@ describe('branchStoredSession desktop source tagging', () => {
     )
     await waitFor(() => expect(branchCurrentSession).not.toBeNull())
 
-    // Branch from the FIRST assistant reply ("a1"), not the last message —
+    // Branch from the FIRST assistant reply ("a1"), not the last message ï¿½
     // this is exactly the scenario that used to drop the question (bug #1):
     // only the clicked message survived instead of everything up to it.
     await expect(branchCurrentSession!('a1')).resolves.toBe(true)
@@ -1585,5 +1595,23 @@ describe('createBackendSessionForSend workspace target', () => {
     )
 
     expect(params).toMatchObject({ cwd: '/clicked-workspace' })
+  })
+})
+describe('selectSidebarItem', () => {
+  it('fronts the workspace pane when navigating to a sidebar route (issue #72602)', async () => {
+    const navigate = vi.fn()
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    render(<Harness navigate={navigate} onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => {
+      handle!.selectSidebarItem({ icon: (() => null) as never, id: 'skills', label: 'Capabilities', route: '/skills' })
+    })
+
+    expect(navigate).toHaveBeenCalledWith('/skills', undefined)
+    expect(noteActiveTreeGroup).toHaveBeenCalledWith(null)
+    expect(revealTreePane).toHaveBeenCalledWith('workspace')
   })
 })
