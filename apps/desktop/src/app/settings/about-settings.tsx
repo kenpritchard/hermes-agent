@@ -102,6 +102,9 @@ export function AboutSettings() {
           <p className="mt-1 text-xs text-muted-foreground">
             {version?.appVersion ? a.version(version.appVersion) : a.versionUnavailable}
           </p>
+          <p className="mt-1 text-xs font-medium text-amber-600 dark:text-amber-500">
+            ⎇ fork build · {version?.hermesRoot ?? 'unknown source'}
+          </p>
         </div>
       </div>
 
@@ -172,7 +175,7 @@ export function AboutSettings() {
 
         <ListRow
           description={a.automaticUpdatesDesc}
-          hint={a.branchCommit(status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
+          hint={a.branchCommit(status?.currentBranch ?? status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
           title={a.automaticUpdates}
         />
 

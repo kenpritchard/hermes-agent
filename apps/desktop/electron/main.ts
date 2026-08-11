@@ -1277,7 +1277,7 @@ function rememberLog(chunk) {
     return
   }
 
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19)
+  const ts = new Date().toLocaleString('sv-SE', { hour12: false }).replace('T', ' ').slice(0, 19)
   const lines = text.split(/\r?\n/).map(line => `[hermes] [${ts}] ${line}`)
   hermesLog.push(...lines)
 
