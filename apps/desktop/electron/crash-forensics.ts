@@ -37,6 +37,33 @@ export function describeCrashReason(reason: unknown): string {
 }
 
 /**
+ * Wrap an `ipcMain.handle` handler so rejections are captured to desktop.log
+ * before Electron swallows them. Electron catches IPC handler rejections
+ * internally and logs to the DevTools console, but never emits
+ * `uncaughtException` or `unhandledRejection` — so `installCrashForensics`
+ * can't see them. This wrapper is the bridge.
+ *
+ * The rejection is re-thrown after logging so Electron's existing DevTools
+ * behavior is preserved (we're adding a log line, not replacing the console
+ * output).
+ */
+export function wrapIpcHandler(
+  channel: string,
+  handler: (event: unknown, ...args: unknown[]) => unknown | Promise<unknown>,
+  { log, flush }: { log: (message: string) => void; flush: () => void }
+): (event: unknown, ...args: unknown[]) => Promise<unknown> {
+  return async (event, ...args) => {
+    try {
+      return await handler(event, ...args)
+    } catch (reason) {
+      log(`[ipc] ${channel}: ${describeCrashReason(reason)}`)
+      flush()
+      throw reason
+    }
+  }
+}
+
+/**
  * Record main-process faults to desktop.log and flush synchronously, since a
  * fault that does prove fatal leaves no chance for the batched async flush.
  */

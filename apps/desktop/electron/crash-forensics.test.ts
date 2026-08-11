@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { describeCrashReason, installCrashForensics } from './crash-forensics'
+import { describeCrashReason, installCrashForensics, wrapIpcHandler } from './crash-forensics'
 
 const harness = () => {
   const listeners = new Map<string, (value: unknown) => void>()
@@ -66,5 +66,61 @@ describe('installCrashForensics', () => {
     const { listeners } = harness()
 
     expect([...listeners.keys()].sort()).toEqual(['uncaughtException', 'unhandledRejection'])
+  })
+})
+
+describe('wrapIpcHandler', () => {
+  it('passes through the return value on success without logging', async () => {
+    const log = vi.fn()
+    const flush = vi.fn()
+    const handler = vi.fn().mockResolvedValue({ ok: true })
+
+    const wrapped = wrapIpcHandler('hermes:api', handler, { log, flush })
+    const result = await wrapped('event', { path: '/sessions' })
+
+    expect(result).toEqual({ ok: true })
+    expect(log).not.toHaveBeenCalled()
+    expect(flush).not.toHaveBeenCalled()
+  })
+
+  it('logs and flushes when the handler rejects, then re-throws', async () => {
+    const log = vi.fn()
+    const flush = vi.fn()
+    const error = new Error('404: {"detail":"Session not found"}')
+    error.stack = 'Error: 404: {"detail":"Session not found"}\n    at IncomingMessage.<anonymous>'
+    const handler = vi.fn().mockRejectedValue(error)
+
+    const wrapped = wrapIpcHandler('hermes:api', handler, { log, flush })
+
+    await expect(wrapped('event', { path: '/sessions/123' })).rejects.toThrow('404')
+
+    expect(log).toHaveBeenCalledWith(
+      '[ipc] hermes:api: Error: 404: {"detail":"Session not found"}\n    at IncomingMessage.<anonymous>'
+    )
+    expect(flush).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards handler arguments unchanged', async () => {
+    const log = vi.fn()
+    const flush = vi.fn()
+    const handler = vi.fn().mockResolvedValue(null)
+
+    const wrapped = wrapIpcHandler('hermes:api', handler, { log, flush })
+    await wrapped('event-obj', 'arg1', 'arg2', { key: 'value' })
+
+    expect(handler).toHaveBeenCalledWith('event-obj', 'arg1', 'arg2', { key: 'value' })
+  })
+
+  it('handles non-Error rejections (strings, objects)', async () => {
+    const log = vi.fn()
+    const flush = vi.fn()
+    const handler = vi.fn().mockRejectedValue('plain string failure')
+
+    const wrapped = wrapIpcHandler('hermes:custom', handler, { log, flush })
+
+    await expect(wrapped('event')).rejects.toBe('plain string failure')
+
+    expect(log).toHaveBeenCalledWith('[ipc] hermes:custom: plain string failure')
+    expect(flush).toHaveBeenCalledTimes(1)
   })
 })

@@ -76,7 +76,7 @@ import {
   savedProfileSsh,
   tokenPreview
 } from './connection-config'
-import { describeCrashReason, installCrashForensics } from './crash-forensics'
+import { describeCrashReason, installCrashForensics, wrapIpcHandler } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import {
@@ -1302,6 +1302,14 @@ function rememberLog(chunk) {
 }
 
 installCrashForensics({ flush: flushDesktopLogBufferSync, log: rememberLog })
+
+// Wrap ipcMain.handle so IPC handler rejections are captured to desktop.log.
+// Electron swallows ipcMain.handle rejections — they never reach
+// uncaughtException/unhandledRejection, so crash-forensics can't see them.
+// This monkey-patch wraps every handler registration automatically.
+const _originalIpcHandle = ipcMain.handle.bind(ipcMain)
+ipcMain.handle = (channel, handler) =>
+  _originalIpcHandle(channel, wrapIpcHandler(channel, handler, { log: rememberLog, flush: flushDesktopLogBufferSync }))
 
 // A rejected loadURL leaves a blank window and, unhandled, no trace anywhere
 // the user can send us. `label` names the surface so the log says which one.
