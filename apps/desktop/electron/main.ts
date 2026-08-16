@@ -1366,9 +1366,10 @@ function rememberLog(chunk) {
     return
   }
 
-  // One timestamp per chunk: lines arriving in the same event happened
-  // at the same moment.  ISO-8601 UTC, matching agent.log/gateway.log.
-  const stamp = new Date().toISOString()
+  // One timestamp per chunk: lines arriving in the same event happened at
+  // the same moment. Keep desktop.log in the user's local time so it aligns
+  // with their Desktop observations and Windows Event Viewer timestamps.
+  const stamp = new Date().toLocaleString('sv-SE', { hour12: false }).replace('T', ' ').slice(0, 19)
   const lines = text.split(/\r?\n/).map(line => formatDesktopLogLine(line, stamp))
   hermesLog.push(...lines)
 
