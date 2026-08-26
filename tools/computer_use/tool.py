@@ -196,6 +196,47 @@ _session_auto_approve: Dict[str, bool] = {}
 _always_allow: Dict[str, set] = {}
 
 
+# Sessions already told that their approval bypass widened the driver mode.
+# The resolver runs per dispatch, so without this the warning would repeat on
+# every single tool call.
+_escalation_warned: set = set()
+
+
+def _warn_bypass_escalation(session_id: str) -> None:
+    """Say out loud that an approval bypass just widened the driver's mode.
+
+    ``-z`` / ``--yolo`` read as "don't prompt me", but they also swap the
+    driver onto a private ``unrestricted`` daemon, dropping the ceiling the
+    configured mode would have applied. That is deliberate (see
+    ``_cua_permission_mode``) and ``unrestricted`` is reachable no other way
+    — it is intentionally not a config value, so a stale config line cannot
+    silently bypass approvals. But it is easy to trigger without meaning to:
+    a script gets ``-z`` for quiet output and loses its limits as a side
+    effect. So the widening is at least stated, once per session.
+    """
+    key = str(session_id or "")
+    with _approval_lock:
+        if key in _escalation_warned:
+            return
+        _escalation_warned.add(key)
+    try:
+        from tools.computer_use.cua_backend import _cua_configured_permission_mode
+
+        configured = _cua_configured_permission_mode()
+    except Exception:
+        configured = "standard"
+    logger.warning(
+        "computer_use: approval bypass (--yolo / -z) escalated the cua-driver "
+        "permission mode from the configured '%s' to 'unrestricted' for this "
+        "session. Runtime approval prompts are disabled and the driver's "
+        "residual ceilings no longer apply. Drop the bypass flag to keep '%s', "
+        "or declare a version-3 computer_use.capability_manifest to keep a "
+        "ceiling on bypassed runs.",
+        configured,
+        configured,
+    )
+
+
 def _cua_permission_mode(session_id: str) -> str:
     """Map Hermes's explicit approval bypass onto Cua's immutable mode.
 
@@ -216,9 +257,11 @@ def _cua_permission_mode(session_id: str) -> str:
         )
 
         if is_approval_bypass_active_for_session(session_id):
+            _warn_bypass_escalation(session_id)
             return "unrestricted"
         current_key = get_current_session_key(default="")
         if current_key and is_approval_bypass_active_for_session(current_key):
+            _warn_bypass_escalation(session_id)
             return "unrestricted"
     except Exception:
         # Approval state must fail closed if it cannot be resolved.
@@ -232,6 +275,32 @@ def _cua_permission_mode(session_id: str) -> str:
         return _cua_configured_permission_mode()
     except Exception:
         return "standard"
+
+
+def _config_preauthorized(action: str, args: Dict[str, Any]) -> bool:
+    """True when config already carries the authorization for this action.
+
+    ``computer_use.grant_existing_profile`` is a durable, file-backed opt-in
+    that the model can never set. When it is on, an extra runtime prompt for
+    the existing-profile prepare asks the user to re-authorize what they
+    already authorized — and it makes the documented opt-in unusable on any
+    non-interactive run, where the prompt has nobody to answer it and the
+    call dies on approval timeout instead of attaching.
+
+    Scope is deliberately narrow: only the existing-profile prepare, only
+    when the grant is present. Isolated-profile launches still prompt, and
+    any resolution failure falls closed to prompting.
+    """
+    if action != "cua_browser_prepare":
+        return False
+    if args.get("profile_mode") != "existing_profile":
+        return False
+    try:
+        from tools.computer_use.cua_backend import _cua_grant_existing_profile
+
+        return _cua_grant_existing_profile() is True
+    except Exception:
+        return False
 
 
 def _get_backend(session_id: str = "") -> ComputerUseBackend:
@@ -386,6 +455,7 @@ def _shutdown_backend_atexit() -> None:
     with _approval_lock:
         _session_auto_approve.clear()
         _always_allow.clear()
+        _escalation_warned.clear()
 
     for backend, call_lock in unique.values():
         try:
@@ -512,8 +582,9 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
             "code": "bring_to_front_requires_foreground",
         })
 
-    # Approval gate (destructive actions only).
-    if action in _DESTRUCTIVE_ACTIONS:
+    # Approval gate (destructive actions only). A durable config grant is
+    # already the user's authorization, so it stands in for the prompt.
+    if action in _DESTRUCTIVE_ACTIONS and not _config_preauthorized(action, args):
         err = _request_approval(action, args, session_id)
         if err is not None:
             return err
@@ -637,7 +708,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
                 "window_id": args.get("window_id"),
             })
         cap = backend.capture(**capture_kwargs)
-        return _capture_response(cap, max_elements=_coerce_max_elements(args.get("max_elements")))
+        return _capture_response(cap)
 
     if action == "wait":
         seconds = float(args.get("seconds", 1.0))
@@ -673,10 +744,11 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             ("query", "query"),
             ("scope_ref", "scope_ref"),
             ("continuation", "continuation"),
+            ("include_screenshot", "include_screenshot"),
         ):
             if args.get(public) is not None:
                 state_args[internal] = args[public]
-        return json.dumps(backend.typed_browser_state(**state_args))
+        return _browser_state_response(backend.typed_browser_state(**state_args))
 
     if action == "cua_browser_prepare":
         return json.dumps(backend.typed_browser_prepare(
@@ -685,7 +757,6 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             profile_mode=args.get("profile_mode", "isolated_new"),
             profile_name=args.get("profile_name"),
             allow_launch=bool(args.get("allow_launch")),
-            approval_token=args.get("approval_token"),
         ))
 
     browser_tools = {
@@ -703,7 +774,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         allowed_fields = {
             "browser_navigate": ("url",),
             "browser_click": ("ref", "input_route", "x", "y"),
-            "browser_type": ("ref", "text"),
+            "browser_type": ("ref", "text", "replace"),
             "browser_pointer": (
                 "ref", "destination_ref", "input_route", "x", "y",
                 "to_x", "to_y", "delta_x", "delta_y",
@@ -872,6 +943,41 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
 # Response shaping
 # ---------------------------------------------------------------------------
 
+def _browser_state_response(payload: Dict[str, Any]) -> Any:
+    """Return browser state as JSON, preserving requested MCP image parts."""
+    state = dict(payload)
+    raw_images = state.pop("_mcp_images", None)
+    if not isinstance(raw_images, list) or not raw_images:
+        return json.dumps(state)
+
+    text_summary = json.dumps(state)
+    content: List[Dict[str, Any]] = [
+        {"type": "text", "text": text_summary},
+    ]
+    image_count = 0
+    for image in raw_images:
+        if not isinstance(image, dict):
+            continue
+        data = image.get("data")
+        if not isinstance(data, str) or not data:
+            continue
+        mime_type = image.get("mime_type")
+        if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+            mime_type = "image/jpeg" if data.startswith("/9j/") else "image/png"
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{data}"},
+        })
+        image_count += 1
+    if image_count == 0:
+        return text_summary
+    return {
+        "_multimodal": True,
+        "content": content,
+        "text_summary": text_summary,
+        "meta": {"action": "cua_browser_state", "images": image_count},
+    }
+
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
     """Choose the next ladder step from semantic evidence, in precedence order.
 
@@ -882,14 +988,35 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
     if res.effect == "confirmed" or res.verified is True:
         return {"decision": "done"}
     if res.effect == "unverifiable":
-        return {"decision": "verify_fresh_state"}
+        return {
+            "decision": "verify_fresh_state",
+            "hint": (
+                "Input was delivered but not confirmed. Re-capture and check "
+                "the result BEFORE any retry — do not repeat the input on an "
+                "escalation recommendation alone."
+            ),
+        }
     if res.effect == "suspected_noop" or not res.ok or res.code is not None:
         decision: Dict[str, Any] = {"decision": "escalate"}
         if isinstance(res.escalation, dict):
             decision["recommended"] = res.escalation.get("recommended")
+        decision["hint"] = (
+            "The input likely did not land. Climb one rung following "
+            "`recommended`: 'px' → re-issue by coordinate; 'page' → the typed "
+            "cua_browser_* route; 'foreground' (or a failed pixel click) → "
+            "re-issue with delivery_mode='foreground' (separate approval). Do "
+            "not predict the rung from the app being Electron/Chromium — react "
+            "to this signal."
+        )
         return decision
     # Transport success without semantic proof is not proof of effect.
-    return {"decision": "verify_fresh_state"}
+    return {
+        "decision": "verify_fresh_state",
+        "hint": (
+            "Transport succeeded but the effect is unproven. Re-capture and "
+            "confirm before continuing."
+        ),
+    }
 
 
 def _action_payload(res: ActionResult) -> Dict[str, Any]:
@@ -972,15 +1099,13 @@ def _enrich_escalation(res: ActionResult) -> Optional[Dict[str, Any]]:
     return enriched
 
 
-# Default cap for the AX `elements` array returned by capture. Dense UIs
-# (Electron apps, Obsidian, JetBrains IDEs) can publish 500+ AX nodes, which
-# can exhaust session context after a single capture. The model-facing
-# `max_elements` argument lets callers raise this when they need the full tree.
+# Fixed cap for the AX `elements` array surfaced in a capture response. Dense
+# UIs (Electron apps, Obsidian, JetBrains IDEs) can publish 500+ AX nodes,
+# which would exhaust session context after a single capture. The full,
+# untruncated tree is always written to an `elements_file` spill (see
+# _capture_lost_detail) so nothing is lost — read_file/search_files it when the
+# target isn't in the surfaced window.
 _DEFAULT_MAX_ELEMENTS = 100
-# Hard upper bound on caller-supplied `max_elements`. Without this, a tool
-# call passing a very large integer would silently disable the safeguard and
-# reintroduce the original unbounded behavior.
-_MAX_ALLOWED_MAX_ELEMENTS = 1000
 _MIN_PROVIDER_IMAGE_DIMENSION = 8
 
 
@@ -1038,28 +1163,6 @@ def _image_dimensions_from_b64(image_b64: str) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _coerce_max_elements(value: Any) -> int:
-    """Validate the caller-supplied ``max_elements``.
-
-    Falls back to :data:`_DEFAULT_MAX_ELEMENTS` for missing / non-integer /
-    sub-1 inputs so the cap can never be silently disabled by a malformed
-    tool-call argument. Clamps oversized values to
-    :data:`_MAX_ALLOWED_MAX_ELEMENTS` so a caller cannot bypass the
-    safeguard by passing a very large integer.
-    """
-    if value is None:
-        return _DEFAULT_MAX_ELEMENTS
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return _DEFAULT_MAX_ELEMENTS
-    if n < 1:
-        return _DEFAULT_MAX_ELEMENTS
-    if n > _MAX_ALLOWED_MAX_ELEMENTS:
-        return _MAX_ALLOWED_MAX_ELEMENTS
-    return n
-
-
 def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
     total_elements = len(cap.elements)
     visible_elements = cap.elements[:max_elements]
@@ -1089,11 +1192,16 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
             or image_dimensions[1] < _MIN_PROVIDER_IMAGE_DIMENSION
         )
     )
+    screenshot_path = (
+        _persist_capture_image(cap)
+        if cap.png_b64 and cap.mode != "ax" and not image_too_small
+        else None
+    )
 
     # Index only what's actually surfaced in the response — otherwise the
     # human-readable summary references element indices the model cannot
-    # find in the JSON `elements` array (e.g. max_elements=10 vs the default
-    # 40-line index window).
+    # find in the JSON `elements` array (the surfaced window is capped at
+    # _DEFAULT_MAX_ELEMENTS; the full tree spills to elements_file).
     element_index = _format_elements(visible_elements)
     summary_lines = [
         f"capture mode={cap.mode} {response_width}x{response_height}"
@@ -1103,6 +1211,12 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
     ]
     if bounds_note:
         summary_lines.append(f"  ({bounds_note})")
+    if screenshot_path:
+        summary_lines.append(
+            f"  (shareable screenshot saved to {screenshot_path})"
+        )
+    if cap.note:
+        summary_lines.append(f"  ({cap.note})")
     if elements_file:
         summary_lines.append(
             f"  (full element tree with untruncated labels saved to "
@@ -1137,6 +1251,7 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
                 visible_elements=visible_elements,
                 truncated_elements=truncated_elements,
                 elements_file=elements_file,
+                screenshot_path=screenshot_path,
             )
             if routed is not None:
                 return routed
@@ -1154,8 +1269,9 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
             if truncated_elements:
                 summary_lines.append(
                     f"  (response truncated to {len(visible_elements)} of "
-                    f"{total_elements} elements; raise max_elements or pass "
-                    "app= to narrow)"
+                    f"{total_elements} elements; the full tree is in "
+                    "elements_file — read_file/search_files it, or pass app= "
+                    "to narrow scope)"
                 )
             payload = {
                 "mode": cap.mode,
@@ -1172,6 +1288,8 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
                 payload["truncated_elements"] = truncated_elements
             if elements_file:
                 payload["elements_file"] = elements_file
+            if screenshot_path:
+                payload["screenshot_path"] = screenshot_path
             if bounds_scale:
                 payload["bounds_scale"] = bounds_scale
             return json.dumps(payload)
@@ -1197,16 +1315,17 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
             ],
             "text_summary": summary,
             "meta": {"mode": cap.mode, "width": response_width, "height": response_height,
-                     "elements": total_elements, "png_bytes": cap.png_bytes_len,
-                     **({"elements_file": elements_file} if elements_file else {}),
-                     **({"bounds_scale": bounds_scale} if bounds_scale else {})},
+                      "elements": total_elements, "png_bytes": cap.png_bytes_len,
+                      **({"screenshot_path": screenshot_path} if screenshot_path else {}),
+                      **({"elements_file": elements_file} if elements_file else {}),
+                      **({"bounds_scale": bounds_scale} if bounds_scale else {})},
         }
     # AX-only (or image-missing fallback): text path actually carries the
     # `elements` array, so the truncation note applies here.
     if truncated_elements:
         summary_lines.append(
             f"  (response truncated to {len(visible_elements)} of {total_elements} elements; "
-            f"raise max_elements or pass app= to narrow)"
+            "the full tree is in elements_file — read_file/search_files it, or pass app= to narrow scope)"
         )
     summary = "\n".join(summary_lines)
     payload: Dict[str, Any] = {
@@ -1340,6 +1459,7 @@ def _route_capture_through_aux_vision(
     visible_elements: Optional[List[UIElement]] = None,
     truncated_elements: int = 0,
     elements_file: Optional[str] = None,
+    screenshot_path: Optional[str] = None,
 ) -> Optional[str]:
     """Pre-analyse the captured PNG via ``vision_analyze`` and return a text result.
 
@@ -1453,6 +1573,8 @@ def _route_capture_through_aux_vision(
         payload["truncated_elements"] = truncated_elements
     if elements_file:
         payload["elements_file"] = elements_file
+    if screenshot_path:
+        payload["screenshot_path"] = screenshot_path
     return json.dumps(payload)
 
 
@@ -1541,6 +1663,53 @@ _MAX_ELEMENT_LABEL_CHARS = 120
 # Keep at most this many spilled element-tree files in the cache dir. Each
 # capture of a dense UI can spill; without pruning the cache grows unbounded.
 _MAX_SPILL_FILES = 20
+
+# Keep user-shareable capture files bounded independently from the gateway's
+# periodic media-cache cleanup. CLI-only sessions may never start the gateway,
+# and capture_after can otherwise leave an unbounded screenshot trail.
+_MAX_CAPTURE_FILES = 20
+
+
+def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
+    """Save a capture in Hermes' media cache and return its absolute path.
+
+    Captures are normally embedded only in the model's tool context. Persisting
+    a bounded copy gives attachment-capable surfaces a real file to deliver
+    when the user explicitly asks for the screenshot. This is best-effort: an
+    unwritable cache must never break computer control.
+    """
+    if not cap.png_b64:
+        return None
+    try:
+        import uuid as _uuid
+
+        from hermes_constants import get_hermes_dir
+
+        raw = base64.b64decode(cap.png_b64, validate=False)
+        mime = str(cap.image_mime_type or "").lower()
+        ext = ".jpg" if mime == "image/jpeg" or (
+            not mime and cap.png_b64[:8].startswith("/9j/")
+        ) else ".png"
+
+        cache_dir = get_hermes_dir("cache/images", "image_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            captures = sorted(
+                cache_dir.glob("computer_use_*.*"),
+                key=lambda path: path.stat().st_mtime,
+            )
+            keep_before_write = max(0, _MAX_CAPTURE_FILES - 1)
+            for stale in captures[: max(0, len(captures) - keep_before_write)]:
+                stale.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        path = cache_dir / f"computer_use_{_uuid.uuid4().hex}{ext}"
+        path.write_bytes(raw)
+        return str(path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: screenshot persistence failed: %s", exc)
+        return None
 
 
 def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
