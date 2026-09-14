@@ -206,6 +206,34 @@ Xauthority, launcher log, per-profile xfconf).
 
 ## Troubleshooting
 
+### Launcher identity upgrade
+
+`launcher.pid` now stores `<pid> <starttime_ticks> <boot_id>`: raw Linux
+`/proc/<pid>/stat` field 22 plus `/proc/sys/kernel/random/boot_id`. Unlike
+epoch-based process creation times, these ticks do not change when WSL adjusts
+its estimate of kernel boot time. A different PID start time or boot cannot
+identify the old launcher, and zombies are not reported as running.
+
+Old PID-only and `<pid> <epoch_create_time>` files are **not adopted or
+converted**. Unreadable/malformed identity or a boot-ID mismatch reports no
+verified running screen; start/stop refuse to spawn, signal, or perform orphan
+cleanup against that state. This is a safety refusal, not proof the screen died.
+
+For a container upgrade, **stop the container first**, confirm its screen
+processes have exited, then archive the affected profile's generated
+`<HERMES_HOME>/bot-desktop/` state from its persistent volume before starting
+the rebuilt container. On a non-container host, stop all that profile's screen
+processes before archiving. Keep the archive private: `browser-profile/` holds
+cookies and login sessions, and `xdg/` holds desktop preferences. Preserve those
+directories if retaining sessions/preferences; leave the generated `launcher.pid`,
+`env`, `rfb.sock`, `display`, and `Xauthority` out of the new state directory.
+Never rewrite a live PID file with its current ticks/boot ID, delete it while
+the screen is alive, or use the unverified PID as a kill target. New starts
+write the new identity automatically. If procfs is inaccessible, restore access
+before starting a new screen.
+
+### Common issues
+
 - **"Screen packages missing"** — click **Install on host** in the pane, or run
   the printed install line on the gateway host (not on the machine running
   Hermes Desktop). The pane refuses a second install while one is running.

@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -91,7 +93,7 @@ def test_screen_started_or_stopped_by_another_process_is_broadcast_as_status(tmp
     server._poll_runtime_files()  # seed
     assert not [e for e in events if e[0] == "display.status"]
 
-    # what runtime.start() publishes from another process: launcher.pid then env
+    # File transitions also notify for unverified/legacy state; this is not a live launcher fixture.
     (home / "bot-desktop" / "launcher.pid").write_text("424242 1.5", encoding="utf-8")
     (home / "bot-desktop" / "env").write_text("DISPLAY=:77\n", encoding="utf-8")
     server._poll_runtime_files()
@@ -104,18 +106,20 @@ def test_screen_started_or_stopped_by_another_process_is_broadcast_as_status(tmp
     assert [p for e, p in events if e == "display.status"][-1]["running"] is False
 
 
+@pytest.mark.linux_only
 def test_launcher_dying_without_touching_its_files_is_broadcast_as_stopped(tmp_path, monkeypatch):
     """Xvnc/the launcher crashing leaves env and launcher.pid exactly as they were, so a watcher keyed
     on mtimes alone never told the Desktop the screen was gone. The mark must include liveness."""
-    import psutil
+    from tools.bot_desktop import runtime
     import tui_gateway.server as server
 
     home = tmp_path / "home"
     (home / "bot-desktop").mkdir(parents=True)
     launcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], stdin=subprocess.DEVNULL)  # noqa: S603
     try:
-        born = psutil.Process(launcher.pid).create_time()
-        (home / "bot-desktop" / "launcher.pid").write_text(f"{launcher.pid} {born!r}", encoding="utf-8")
+        ticks, _ = runtime._proc_start(launcher.pid)
+        (home / "bot-desktop" / "launcher.pid").write_text(
+            f"{launcher.pid} {ticks} {runtime._boot_id()}", encoding="utf-8")
         (home / "bot-desktop" / "env").write_text("DISPLAY=:77\n", encoding="utf-8")
         events = _watching(server, home, monkeypatch)
         server._poll_runtime_files()  # seed: running

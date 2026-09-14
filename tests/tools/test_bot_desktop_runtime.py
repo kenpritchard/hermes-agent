@@ -28,10 +28,9 @@ def test_no_running_screen_returns_none_without_grabbing(monkeypatch):
     assert thumbnail.thumbnail_data_url() is None
 
 
+@pytest.mark.linux_only
 def test_recycled_pid_is_not_our_launcher(tmp_path, monkeypatch):
-    """launcher.pid names pid + create_time; a live pid born at another time is a stranger (recycled pid)
-    and must read as not running, or stop() would killpg an unrelated session. Legacy single-number
-    files and absurd digit strings are also not running."""
+    """Only the same raw start ticks on the same boot identify our live launcher."""
     import os
 
     monkeypatch.setattr(runtime, "state_dir", lambda: tmp_path)
@@ -42,7 +41,12 @@ def test_recycled_pid_is_not_our_launcher(tmp_path, monkeypatch):
     assert runtime._launcher_pid() is None
     pidfile.write_text("9" * 40 + " 1.0", encoding="utf-8")
     assert runtime._launcher_pid() is None
-    pidfile.write_text(f"{os.getpid()} {runtime._create_time(os.getpid())}", encoding="utf-8")
+    ticks, _ = runtime._proc_start(os.getpid())
+    boot = runtime._boot_id()
+    pidfile.write_text(f"{os.getpid()} {ticks + 1} {boot}", encoding="utf-8")
+    assert runtime._launcher_pid() is None
+    assert runtime._recorded_launcher_pid() is None
+    pidfile.write_text(f"{os.getpid()} {ticks} {boot}", encoding="utf-8")
     assert runtime._launcher_pid() == os.getpid()
 
 
@@ -221,6 +225,50 @@ def test_orphaned_x_server_of_a_dead_launcher_is_reaped_on_next_start(in_process
     assert second.pid != first.pid and second.running
     assert _wait_until(lambda: _gone(orphan)), "the dead launcher's X server must be reaped, not leaked"
     assert runtime.stop() is True
+
+
+@pytest.mark.linux_only
+@pytest.mark.live_system_guard_bypass
+def test_clock_correction_keeps_real_launcher_running(in_process_runtime, monkeypatch):
+    import psutil
+
+    (in_process_runtime / "launcher.sh").write_text(_ORPHANING_LAUNCHER, encoding="utf-8")
+    first = runtime.start(wait_seconds=10)
+    record = (runtime.state_dir() / "launcher.pid").read_bytes()
+    for epoch in (1789399185.57, 1789399202.57, 1789399220.57):
+        monkeypatch.setattr(psutil, "boot_time", lambda: epoch)
+        monkeypatch.setattr(psutil.Process, "create_time", lambda self: epoch)
+        assert runtime.status().running
+        assert runtime.start(wait_seconds=10).pid == first.pid
+        assert (runtime.state_dir() / "launcher.pid").read_bytes() == record
+    assert first.pid is not None
+    assert runtime.stop()
+    assert _gone(first.pid)
+
+
+@pytest.mark.linux_only
+@pytest.mark.live_system_guard_bypass
+def test_unreadable_new_launcher_identity_cleans_up_child(in_process_runtime, monkeypatch):
+    import subprocess
+
+    (in_process_runtime / "launcher.sh").write_text(_ORPHANING_LAUNCHER, encoding="utf-8")
+    children = []
+    popen = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def unavailable(pid):
+        raise PermissionError("proc stat unavailable")
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(runtime, "_proc_start", unavailable)
+    with pytest.raises(RuntimeError, match="could not record launcher identity"):
+        runtime.start(wait_seconds=10)
+    assert children and all(child.poll() is not None for child in children)
+    assert not any((runtime.state_dir() / name).exists() for name in ("launcher.pid", "env", "rfb.sock"))
 
 
 _SLOW_LAUNCHER = """#!/usr/bin/env bash

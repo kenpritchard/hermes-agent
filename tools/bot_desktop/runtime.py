@@ -145,34 +145,94 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _create_time(pid: int) -> Optional[float]:
-    import psutil
-    try:
-        return psutil.Process(pid).create_time()
-    except (psutil.Error, OverflowError, ValueError):
-        return None
+_PROC = Path("/proc")
 
 
-def _launcher_pid() -> Optional[int]:
-    """The live launcher's pid, or None. ``launcher.pid`` holds ``"<pid> <create_time>"``: a recycled pid
-    with a different start time is somebody else's process and must never be reported as ours nor
-    killed by :func:`stop`. The pre-identity single-number format is treated as not running."""
-    raw = _read(state_dir() / "launcher.pid")
-    pid_s, _, born_s = (raw or "").partition(" ")
-    if not pid_s.isdigit() or not born_s:
-        return None
+def _boot_id() -> str:
+    from uuid import UUID
+    raw = (_PROC / "sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    if str(UUID(raw)) != raw:
+        raise ValueError("malformed kernel boot_id")
+    return raw
+
+
+def _proc_start(pid: int) -> tuple[int, str]:
+    """Raw starttime (field 22), not boot_time + ticks/HZ: WSL can revise boot_time.
+
+    comm is parenthesized but can itself contain spaces and parentheses; only the LAST ')' ends it.
+    Keep state from the same read so a zombie never counts as a running launcher.
+    """
+    raw = (_PROC / str(pid) / "stat").read_text(encoding="utf-8")
+    prefix, sep, tail = raw.rpartition(") ")
+    fields = tail.split()
+    if (not sep or not prefix.startswith(f"{pid} (") or len(fields) < 20
+            or fields[0] not in {"R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I"}
+            or not fields[19].isascii() or not fields[19].isdigit()):
+        raise ValueError("malformed process stat")
+    return int(fields[19]), fields[0]
+
+
+def _launcher_record() -> Optional[tuple[int, int, str]]:
+    """Reject PID-only and epoch records; never adopt a process using incomplete identity."""
     try:
-        pid, born = int(pid_s), float(born_s)
-    except ValueError:
+        raw = (state_dir() / "launcher.pid").read_text(encoding="ascii")
+    except FileNotFoundError:
         return None
-    actual = _create_time(pid)
-    return pid if actual is not None and abs(actual - born) < 0.01 and _pid_alive(pid) else None
+    fields = raw.split()
+    if len(fields) != 3:
+        raise ValueError("legacy or malformed launcher.pid")
+    pid_s, ticks_s, boot = fields
+    if not pid_s.isdecimal() or not ticks_s.isdecimal():
+        raise ValueError("malformed launcher.pid")
+    pid, ticks = int(pid_s), int(ticks_s)
+    if not 0 < pid <= 2147483647 or boot != _boot_id():
+        raise ValueError("invalid PID or different kernel boot")
+    return pid, ticks, boot
+
+
+def _launcher_pid(*, strict: bool = False) -> Optional[int]:
+    """Match ``<pid> <starttime_ticks> <boot_id>``; unknown identity is NOT proof of death.
+
+    Read-only callers report not running. Mutating callers refuse unknown state rather than
+    treating a possibly live screen as an orphan (including during the legacy-format transition).
+    """
+    try:
+        record = _launcher_record()
+        if record is None:
+            return None
+        pid, ticks, _ = record
+        try:
+            actual, state = _proc_start(pid)
+        except FileNotFoundError:
+            # A missing stat in an existing PID directory is not proof the process exited.
+            if (_PROC / str(pid)).exists():
+                raise
+            return None
+        return pid if actual == ticks and state not in {"Z", "X", "x"} else None
+    except (OSError, ValueError) as exc:
+        if strict:
+            raise RuntimeError(
+                "Bot Desktop launcher identity cannot be verified; stop the container (or all its "
+                "screen processes), then archive generated bot-desktop state before restarting. "
+                "Do not adopt or rewrite a live launcher.pid."
+            ) from exc
+        return None
 
 
 def _recorded_launcher_pid() -> Optional[int]:
-    """The pid ``launcher.pid`` names, alive or not (the orphan sweep matches process groups against it)."""
-    pid_s, _, born_s = (_read(state_dir() / "launcher.pid") or "").partition(" ")
-    return int(pid_s) if pid_s.isdigit() and born_s else None
+    """A same-boot, non-reused PID for orphan group matching; never trust legacy records."""
+    try:
+        record = _launcher_record()
+        if record is not None:
+            pid, ticks, _ = record
+            try:
+                actual, _ = _proc_start(pid)
+            except FileNotFoundError:
+                return pid if not (_PROC / str(pid)).exists() else None
+            return pid if actual == ticks else None
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 _X_LOCK_DIR = Path("/tmp")  # where X servers write .X<n>-lock (tests point it at a scratch dir)
@@ -201,6 +261,8 @@ def _reap_orphaned_server(sd: Path) -> bool:
     socket. Kill it (group first), drop the state it left, and report whether anything was signalled."""
     import psutil
 
+    if _launcher_pid(strict=True) is not None:
+        return False  # unknown identity must not reach the socket-based orphan fallback either
     recorded = _read(sd / "display")
     pid = _x_lock_pid(int(recorded)) if recorded and recorded.isdigit() else None
     if pid is None or not _pid_alive(pid):
@@ -405,7 +467,7 @@ def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
     sd.mkdir(parents=True, exist_ok=True)
     os.chmod(sd, 0o700)
     with _flocked(sd / "start.lock"):
-        if _launcher_pid() is not None and published_env().get("DISPLAY"):
+        if _launcher_pid(strict=True) is not None and published_env().get("DISPLAY"):
             return status()
         if _launcher_pid() is None:
             _reap_orphaned_server(sd)
@@ -415,6 +477,7 @@ def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
 
 
 def _spawn_and_wait(sd: Path, num: int, wait_seconds: float) -> DesktopStatus:
+    boot = _boot_id()  # fail before spawning if procfs identity is unavailable
     (sd / "display").write_text(str(num), encoding="utf-8")
     env_file = sd / "env"
     env_file.unlink(missing_ok=True)
@@ -441,8 +504,18 @@ def _spawn_and_wait(sd: Path, num: int, wait_seconds: float) -> DesktopStatus:
         ["bash", str(_LAUNCHER)], env=child_env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         start_new_session=True, close_fds=True)
     log.close()
-    born = _create_time(proc.pid)
-    (sd / "launcher.pid").write_text(f"{proc.pid} {born if born is not None else 0}", encoding="utf-8")
+    try:
+        ticks, state = _proc_start(proc.pid)
+        if state in {"Z", "X", "x"}:
+            raise ValueError("launcher already exited")
+        (sd / "launcher.pid").write_text(f"{proc.pid} {ticks} {boot}", encoding="ascii")
+    except (OSError, ValueError) as exc:
+        # This unreaped Popen child is ours even if procfs failed; never leave an untracked screen.
+        _kill_group_then_wait(proc.pid, proc.pid)
+        proc.wait()
+        for name in ("launcher.pid", "env", "rfb.sock"):
+            (sd / name).unlink(missing_ok=True)
+        raise RuntimeError("Bot Desktop could not record launcher identity") from exc
 
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
@@ -475,7 +548,7 @@ def stop() -> bool:
 
 
 def _stop_locked(sd: Path) -> bool:
-    pid = _launcher_pid()
+    pid = _launcher_pid(strict=True)
     if pid is None:
         reaped = _reap_orphaned_server(sd)
         (sd / "env").unlink(missing_ok=True)

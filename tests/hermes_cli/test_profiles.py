@@ -1248,7 +1248,8 @@ def _live_bot_desktop_launcher(profile_dir: Path):
     proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
     sd = profile_dir / "bot-desktop"
     sd.mkdir()
-    (sd / "launcher.pid").write_text(f"{proc.pid} {runtime._create_time(proc.pid)}", encoding="utf-8")
+    ticks, _ = runtime._proc_start(proc.pid)
+    (sd / "launcher.pid").write_text(f"{proc.pid} {ticks} {runtime._boot_id()}", encoding="utf-8")
     (sd / "env").write_text("DISPLAY=:42\n", encoding="utf-8")
     return proc
 
