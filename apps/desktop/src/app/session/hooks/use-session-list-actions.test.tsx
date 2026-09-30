@@ -2,7 +2,7 @@ import { act, render, renderHook } from '@testing-library/react'
 import { Suspense } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { SessionInfo, SidebarSessionsResponse } from '@/hermes'
+import { type SessionInfo, setApiRequestConnection, type SidebarSessionsResponse } from '@/hermes'
 import { $cronJobs, setCronJobs } from '@/store/cron'
 import {
   beginGatewaySwitch,
@@ -10,6 +10,7 @@ import {
   recoverActiveSourceAfterFailedGatewaySwitch,
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
+import { $profilesByConnection } from '@/store/profile'
 import {
   $cronSessions,
   $messagingPlatformTotals,
@@ -30,6 +31,7 @@ import {
   setSessionsLoadError,
   setSessionsLoading
 } from '@/store/session'
+import type { ProfileInfo } from '@/types/hermes'
 
 import { deferred } from '../../../test/deferred'
 
@@ -116,6 +118,8 @@ vi.mock('@/store/session-states', async importActual => ({
 }))
 
 beforeEach(() => {
+  setApiRequestConnection(null)
+  $profilesByConnection.set(new Map())
   gatewayScope.epoch = 0
   settled.ids = []
   getCronJobs.mockReset()
@@ -136,6 +140,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setApiRequestConnection(null)
+  $profilesByConnection.set(new Map())
   setCronJobs([])
   setSessions([])
   setCronSessions([])
@@ -146,6 +152,81 @@ afterEach(() => {
   setSessionProfilesUsage({})
   setSessionsLoading(false)
   setSessionsLoadError(false)
+})
+
+describe('background refreshes across gateway owners', () => {
+  const profile = (name: string) => ({ name }) as ProfileInfo
+
+  it('does not query the remote gateway for a Windows-local-only profile', async () => {
+    $profilesByConnection.set(
+      new Map([
+        ['local', [profile('default'), profile('office-evals-windows')]],
+        ['localhost-9119', [profile('default'), profile('marina')]]
+      ])
+    )
+    setApiRequestConnection('localhost-9119')
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    await act(async () => {
+      await Promise.all([result.current.refreshSessions(), result.current.refreshCronJobs(), result.current.refreshMessagingSessions()])
+    })
+
+    expect(listSidebarSessions).not.toHaveBeenCalled()
+    expect(getCronJobs).not.toHaveBeenCalled()
+    expect(listAllProfileSessions).not.toHaveBeenCalled()
+  })
+
+  it('does not need a cached local roster to reject an absent remote profile', async () => {
+    $profilesByConnection.set(new Map([['localhost-9119', [profile('marina')]]]))
+    setApiRequestConnection('localhost-9119')
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    await act(async () => {
+      await Promise.all([result.current.refreshSessions(), result.current.refreshCronJobs()])
+    })
+
+    expect(listSidebarSessions).not.toHaveBeenCalled()
+    expect(getCronJobs).not.toHaveBeenCalled()
+  })
+
+  it('keeps same-named profiles on the selected remote gateway routable', async () => {
+    $profilesByConnection.set(
+      new Map([
+        ['local', [profile('office-evals-windows')]],
+        ['localhost-9119', [profile('office-evals-windows')]]
+      ])
+    )
+    setApiRequestConnection('localhost-9119')
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+      await result.current.refreshCronJobs()
+    })
+
+    expect(listSidebarSessions).toHaveBeenCalledOnce()
+    expect(getCronJobs).toHaveBeenCalledWith('office-evals-windows')
+  })
+
+  it('still refreshes the Windows profile when the local source is selected', async () => {
+    $profilesByConnection.set(
+      new Map([
+        ['local', [profile('office-evals-windows')]],
+        ['localhost-9119', [profile('marina')]]
+      ])
+    )
+    setApiRequestConnection('local')
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect(listSidebarSessions).toHaveBeenCalledOnce()
+    expect(getCronJobs).toHaveBeenCalledWith('office-evals-windows')
+  })
 })
 
 describe('workspace-only sidebar refresh', () => {
