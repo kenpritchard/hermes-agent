@@ -18,7 +18,7 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
-import { messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
+import { $profilesByConnection, messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
 import {
   $messagingSessions,
   $selectedStoredSessionId,
@@ -76,6 +76,23 @@ const SIDEBAR_EXCLUDED_SOURCES = [
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.
 const MESSAGING_EXCLUDED_SOURCES = ['cron', ...LOCAL_SESSION_SOURCE_IDS]
+
+// A profile name is not a cross-gateway identity. During a connection switch,
+// a queued sidebar refresh can still name a Windows-local profile while the
+// ambient REST connection already points at a remote gateway. Once that remote
+// has supplied its roster, do not query it for absent profiles. Unknown rosters
+// and same-named profiles on the selected remote remain routable.
+function profileIsAbsentOnSelectedRemote(profile: string): boolean {
+  const connectionId = getApiRequestConnection()
+
+  if (!connectionId || connectionId === 'local' || profile === 'all') {
+    return false
+  }
+
+  const remote = $profilesByConnection.get().get(connectionId)
+
+  return Boolean(remote && !remote.some(item => normalizeProfileKey(item.name) === profile))
+}
 
 // Drop rows the user just deleted/archived: ANY list fetch (full refresh,
 // "Load more" paging, a per-platform messaging page, the cron slice) can race
@@ -182,6 +199,10 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const refreshMessagingSessions = useCallback(async () => {
     const sessionProfile = sidebarProfileForScope(profileScope)
 
+    if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+      return
+    }
+
     // A callback captured before a profile switch may still be queued by an
     // event subscription. Do not let it start a request against the old scope.
     if (sidebarProfileForScope(profileScopeRef.current) !== sessionProfile) {
@@ -196,7 +217,8 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
 
     const owns = () =>
       refreshMessagingSessionsRequestRef.current === requestId &&
-      sidebarProfileForScope(profileScopeRef.current) === sessionProfile
+      sidebarProfileForScope(profileScopeRef.current) === sessionProfile &&
+      !profileIsAbsentOnSelectedRemote(sessionProfile)
 
     const fetchPage = () =>
       listAllProfileSessions(MESSAGING_SECTION_LIMIT, 1, 'exclude', 'recent', sessionProfile, {
@@ -238,6 +260,10 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const loadMoreMessagingForPlatform = useCallback(
     async (platform: string) => {
       const sessionProfile = sidebarProfileForScope(profileScope)
+
+      if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+        return
+      }
 
       if (sidebarProfileForScope(profileScopeRef.current) !== sessionProfile) {
         return
@@ -310,6 +336,10 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const refreshCronJobs = useCallback(async () => {
     const sessionProfile = sidebarProfileForScope(profileScope)
 
+    if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+      return
+    }
+
     if (sidebarProfileForScope(profileScopeRef.current) !== sessionProfile) {
       return
     }
@@ -325,6 +355,10 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const refreshSessions = useCallback(
     async (shouldPublish: () => boolean = () => true) => {
       const sessionProfile = sidebarProfileForScope(profileScope)
+
+      if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+        return
+      }
 
       if (!shouldPublish() || sidebarProfileForScope(profileScopeRef.current) !== sessionProfile) {
         return
@@ -346,7 +380,8 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       const owns = () =>
         shouldPublish() &&
         refreshSessionsRequestRef.current === requestId &&
-        sidebarProfileForScope(profileScopeRef.current) === sessionProfile
+        sidebarProfileForScope(profileScopeRef.current) === sessionProfile &&
+        !profileIsAbsentOnSelectedRemote(sessionProfile)
 
       // Snapshot the removal lifecycle BEFORE the first read: a page read
       // pre-archive-commit can land post-prune, and only the generation
@@ -513,7 +548,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       }
 
       // Cron *jobs* are a distinct API (getCronJobs), not a session slice.
-      if (shouldPublish() && sidebarProfileForScope(profileScopeRef.current) === sessionProfile) {
+      if (owns()) {
         void refreshCronJobs()
       }
     },
