@@ -35,6 +35,7 @@ import {
 import type { Session } from 'electron'
 
 import { type ActiveRuntimeState, classifyActiveRuntime } from './active-runtime-state'
+import { formatModelOptionsRouteFailure } from './api-route-diagnostics'
 import {
   destroyKeepaliveAgents,
   htmlResponseError,
@@ -17587,6 +17588,19 @@ async function dispatchRegistryApiRequest(
     body: request?.body,
     upload: request?.upload,
     timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+  }).catch(error => {
+    const evidence = formatModelOptionsRouteFailure(request, {
+      connectionId: connection.connectionId ?? registryConnectionId,
+      mode: connection.mode,
+      routeProfile,
+      requestProfile
+    })
+
+    if (evidence) {
+      rememberLog(evidence)
+    }
+
+    throw error
   })
 
   desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response, connection.mode)
@@ -17691,6 +17705,19 @@ async function handleHermesApiRequest(request) {
       timeoutMs
     })
   } catch (error) {
+    if (connection) {
+      const evidence = formatModelOptionsRouteFailure(request, {
+        connectionId: connection.connectionId,
+        mode: connection.mode,
+        routeProfile,
+        requestProfile: profile
+      })
+
+      if (evidence) {
+        rememberLog(evidence)
+      }
+    }
+
     // A failed rename PATCH must not strand the app on the temporary primary:
     // restore the original active profile and restart its backend.
     if (profileRename) {
