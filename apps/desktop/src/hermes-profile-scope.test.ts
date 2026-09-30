@@ -5,9 +5,11 @@ import {
   getActionStatus,
   getElevenLabsVoices,
   getMemoryProviderConfig,
+  getProfiles,
   getStatus,
   restartGateway,
   saveMemoryProviderConfig,
+  setApiRequestConnection,
   setApiRequestProfile,
   speakText,
   transcribeAudio,
@@ -28,6 +30,7 @@ describe('backend action helpers are profile-scoped', () => {
 
   afterEach(() => {
     setApiRequestProfile(null)
+    setApiRequestConnection(null)
     delete (window as { hermesDesktop?: unknown }).hermesDesktop
   })
 
@@ -35,6 +38,18 @@ describe('backend action helpers are profile-scoped', () => {
 
   it('omits profile when none is active (single-profile users unaffected)', () => {
     void getStatus()
+    expect(lastProfile()).toBeUndefined()
+  })
+
+  it('pins a roster lookup without inheriting an unrelated active profile', () => {
+    setApiRequestProfile('office-evals-windows')
+    setApiRequestConnection('other-remote')
+
+    void getProfiles({ connectionId: 'localhost-9119' })
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'localhost-9119', path: '/api/profiles' })
+    )
     expect(lastProfile()).toBeUndefined()
   })
 

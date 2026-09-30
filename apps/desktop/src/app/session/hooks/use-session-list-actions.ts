@@ -18,7 +18,7 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
-import { $profilesByConnection, messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
+import { $profilesByConnection, messagingTotalsKey, normalizeProfileKey, profilesForConnection, sidebarProfileForScope } from '@/store/profile'
 import {
   $messagingSessions,
   $selectedStoredSessionId,
@@ -92,6 +92,31 @@ function profileIsAbsentOnSelectedRemote(profile: string): boolean {
   const remote = $profilesByConnection.get().get(connectionId)
 
   return Boolean(remote && !remote.some(item => normalizeProfileKey(item.name) === profile))
+}
+
+// The roster may not be loaded at the first sidebar/cron refresh. Resolve an
+// unknown remote roster before querying a profile that might be local-only.
+// profilesForConnection single-flights concurrent callers; failed reads get another
+// chance on the next normal refresh rather than leaking a foreign-profile 404.
+function canReadProfileOnSelectedConnection(profile: string): boolean | Promise<boolean> {
+  const connectionId = getApiRequestConnection()
+
+  if (!connectionId || connectionId === 'local' || profile === 'all') {
+    return true
+  }
+
+  const cached = $profilesByConnection.get().get(connectionId)
+
+  if (cached) {
+    return cached.some(item => normalizeProfileKey(item.name) === profile)
+  }
+
+  return profilesForConnection(connectionId)
+    .then(
+      profiles =>
+        getApiRequestConnection() === connectionId && profiles.some(item => normalizeProfileKey(item.name) === profile)
+    )
+    .catch(() => false)
 }
 
 // Drop rows the user just deleted/archived: ANY list fetch (full refresh,
@@ -198,8 +223,9 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   /** Refresh the active profile's messaging-platform sidebar slice. */
   const refreshMessagingSessions = useCallback(async () => {
     const sessionProfile = sidebarProfileForScope(profileScope)
+    const readable = canReadProfileOnSelectedConnection(sessionProfile)
 
-    if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+    if (readable === false || (readable !== true && !(await readable))) {
       return
     }
 
@@ -260,8 +286,9 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const loadMoreMessagingForPlatform = useCallback(
     async (platform: string) => {
       const sessionProfile = sidebarProfileForScope(profileScope)
+      const readable = canReadProfileOnSelectedConnection(sessionProfile)
 
-      if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+      if (readable === false || (readable !== true && !(await readable))) {
         return
       }
 
@@ -335,8 +362,9 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   /** Refresh cron jobs only while the profile that requested them remains active. */
   const refreshCronJobs = useCallback(async () => {
     const sessionProfile = sidebarProfileForScope(profileScope)
+    const readable = canReadProfileOnSelectedConnection(sessionProfile)
 
-    if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+    if (readable === false || (readable !== true && !(await readable))) {
       return
     }
 
@@ -355,8 +383,9 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const refreshSessions = useCallback(
     async (shouldPublish: () => boolean = () => true) => {
       const sessionProfile = sidebarProfileForScope(profileScope)
+      const readable = canReadProfileOnSelectedConnection(sessionProfile)
 
-      if (profileIsAbsentOnSelectedRemote(sessionProfile)) {
+      if (readable === false || (readable !== true && !(await readable))) {
         return
       }
 

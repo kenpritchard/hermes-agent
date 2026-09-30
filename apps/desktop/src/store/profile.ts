@@ -67,6 +67,46 @@ export const $profiles = atom<ProfileInfo[]>(NO_PROFILES)
 // outgoing source's profiles nor blank a source we already know.
 export const $profilesByConnection = atom<ReadonlyMap<string, ProfileInfo[]>>(new Map())
 
+// A sidebar refresh can start before the active connection's roster loads.
+// Fetch an uncached source by its own registry identity, never by the ambient
+// route (which may already have switched while the sidebar still names a
+// profile from the prior source). Keep concurrent cron/session reads together.
+const profileRosterFlights = new Map<string, Promise<ProfileInfo[]>>()
+
+export function profilesForConnection(connectionId: string): Promise<ProfileInfo[]> {
+  const cached = $profilesByConnection.get().get(connectionId)
+
+  if (cached) {
+    return Promise.resolve(cached)
+  }
+
+  const inFlight = profileRosterFlights.get(connectionId)
+
+  if (inFlight) {
+    return inFlight
+  }
+
+  const flight = getProfiles({ connectionId })
+    .then(({ profiles }) => {
+      const newer = $profilesByConnection.get().get(connectionId)
+
+      if (newer) {
+        return newer
+      }
+
+      $profilesByConnection.set(new Map($profilesByConnection.get()).set(connectionId, profiles))
+
+      return profiles
+    })
+    .finally(() => {
+      profileRosterFlights.delete(connectionId)
+    })
+
+  profileRosterFlights.set(connectionId, flight)
+
+  return flight
+}
+
 // Registry descriptors carry their connection id (a slug, so it never contains
 // ':'); legacy primaries are keyed by endpoint. Null is a reconnect blip (see
 // setConnection), not a source.
