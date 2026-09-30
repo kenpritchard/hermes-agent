@@ -77,6 +77,7 @@ const sidebar = (
 const listSidebarSessions = vi.fn()
 const listAllProfileSessions = vi.fn()
 const getCronJobs = vi.fn()
+const getProfiles = vi.fn()
 const gatewayScope = vi.hoisted(() => ({ epoch: 0 }))
 
 interface Deferred<T> {
@@ -89,6 +90,7 @@ interface Deferred<T> {
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getCronJobs: (...args: unknown[]) => getCronJobs(...args),
+  getProfiles: (...args: unknown[]) => getProfiles(...args),
   listAllProfileSessions: (...args: unknown[]) => listAllProfileSessions(...args),
   listSidebarSessions: (...args: unknown[]) => listSidebarSessions(...args)
 }))
@@ -124,6 +126,8 @@ beforeEach(() => {
   settled.ids = []
   getCronJobs.mockReset()
   getCronJobs.mockResolvedValue([])
+  getProfiles.mockReset()
+  getProfiles.mockResolvedValue({ profiles: [] })
   listSidebarSessions.mockReset()
   listAllProfileSessions.mockReset()
   removed.ids = new Set()
@@ -186,6 +190,55 @@ describe('background refreshes across gateway owners', () => {
     })
 
     expect(listSidebarSessions).not.toHaveBeenCalled()
+    expect(getCronJobs).not.toHaveBeenCalled()
+  })
+
+  it('waits for an uncached remote roster before reading a foreign profile', async () => {
+    setApiRequestConnection('localhost-9119')
+    getProfiles.mockResolvedValue({ profiles: [profile('marina')] })
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    await act(async () => {
+      await Promise.all([result.current.refreshSessions(), result.current.refreshCronJobs()])
+    })
+
+    expect(getProfiles).toHaveBeenCalledOnce()
+    expect(getProfiles).toHaveBeenCalledWith({ connectionId: 'localhost-9119' })
+    expect(listSidebarSessions).not.toHaveBeenCalled()
+    expect(getCronJobs).not.toHaveBeenCalled()
+  })
+
+  it('keeps a matching remote profile usable when the roster is not cached yet', async () => {
+    setApiRequestConnection('localhost-9119')
+    getProfiles.mockResolvedValue({ profiles: [profile('office-evals-windows')] })
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    await act(async () => {
+      await Promise.all([result.current.refreshSessions(), result.current.refreshCronJobs()])
+    })
+
+    expect(listSidebarSessions).toHaveBeenCalledOnce()
+    expect(getCronJobs).toHaveBeenCalledWith('office-evals-windows')
+  })
+
+  it('does not send a read after the selected connection changes during roster lookup', async () => {
+    const roster = deferred<{ profiles: ProfileInfo[] }>()
+    setApiRequestConnection('localhost-9119')
+    getProfiles.mockReturnValue(roster.promise)
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
+
+    let pending!: Promise<void>
+    act(() => {
+      pending = result.current.refreshCronJobs()
+    })
+    setApiRequestConnection('other-remote')
+
+    await act(async () => {
+      roster.resolve({ profiles: [profile('office-evals-windows')] })
+      await pending
+    })
+
     expect(getCronJobs).not.toHaveBeenCalled()
   })
 
