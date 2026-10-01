@@ -1424,6 +1424,25 @@ describe('createBackendSessionForSend profile routing', () => {
     expect(ambientRequest).not.toHaveBeenCalledWith('session.create', expect.anything())
   })
 
+  it('logs the captured owner when a default-looking draft fails on a remote profile', async () => {
+    const error = new Error("Profile 'office-evals-windows' does not exist.")
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.mocked(requestGatewayForAgent).mockRejectedValueOnce(error)
+    $activeGatewayProfile.set('default')
+    $newChatProfile.set('office-evals-windows')
+    $newChatRoute.set({ connectionId: 'localhost-9119', profile: 'office-evals-windows' })
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={value => (handle = value)} requestGateway={vi.fn()} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await expect(handle!.createBackendSessionForSend()).rejects.toThrow(error)
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('"capturedRoute":{"connectionId":"localhost-9119","profile":"office-evals-windows"}')
+    )
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('"activeProfile":"default"'))
+  })
+
   it('freezes the visible selector state before profile readiness and sends fast: false explicitly', async () => {
     const profileReady = deferred<void>()
     vi.mocked(ensureGatewayProfile).mockReturnValueOnce(profileReady.promise)

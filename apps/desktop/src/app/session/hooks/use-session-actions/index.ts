@@ -38,6 +38,7 @@ import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue
 import { $connectionRequests } from '@/store/connection-request'
 import {
   $gateway,
+  activeGatewayConnectionId,
   openGatewayForAgent,
   openGatewayForProfile,
   pendingSessionReplay,
@@ -51,6 +52,7 @@ import { prunePreviewTabsForSession } from '@/store/preview'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
+  $newChatConnectionId,
   $newChatProfile,
   $profiles,
   $showAllProfiles,
@@ -167,6 +169,7 @@ import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-t
 import { pendingClarifyToolPayload, restorePendingClarifyFromSnapshot } from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
 import { createGatewaySession } from './session-create-request'
+import { formatSessionCreateRouteFailure } from './session-create-route-diagnostics'
 import {
   createPersistedDisplayTranscriptProvenance,
   hasPersistedDisplayTranscriptProvenance,
@@ -816,7 +819,7 @@ export function useSessionActions({
         const capturedProfile = $newChatProfile.get() || normalizeProfileKey($activeGatewayProfile.get())
         const legacyProfileIntent = isLegacyNewChatProfile(capturedProfile)
 
-        const params = {
+        const params: Record<string, unknown> = {
           ...(await desktopSessionCreateParams(cwd, capturedRoute, capturedProfile, legacyProfileIntent)),
           ...sessionCreateOverrideParams(createOverrides, seedMessages)
         }
@@ -842,7 +845,22 @@ export function useSessionActions({
         let stored: null | string
 
         try {
-          created = await createGatewaySession(capturedRoute, params, requestGateway)
+          try {
+            created = await createGatewaySession(capturedRoute, params, requestGateway)
+          } catch (error) {
+            console.error(
+              formatSessionCreateRouteFailure({
+                activeConnectionId: activeGatewayConnectionId(),
+                activeProfile: $activeGatewayProfile.get(),
+                capturedProfile,
+                capturedRoute,
+                newChatConnectionId: $newChatConnectionId.get(),
+                newChatProfile: $newChatProfile.get(),
+                paramsProfile: String(params.profile ?? '')
+              })
+            )
+            throw error
+          }
 
           stored = created.stored_session_id ?? null
 
