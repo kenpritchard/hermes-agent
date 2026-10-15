@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const $activeGatewayProfile = atom('default')
 const $newChatProfile = atom<string | null>(null)
+const $newChatRoute = atom<{ connectionId: string; profile: string } | null>(null)
 const $freshSessionRequest = atom(0)
 const $showAllProfiles = atom(false)
 const $connection = atom<{ connectionId: string; mode: 'remote'; profile: string; registryScoped: true } | null>(null)
@@ -30,12 +31,14 @@ vi.mock('@/store/session', () => ({ $connection, $activeSessionId, $selectedStor
 vi.mock('@/store/profile', () => ({
   $activeGatewayProfile,
   $newChatProfile,
+  $newChatRoute,
   $freshSessionRequest,
   $showAllProfiles,
   normalizeProfileKey: (value: string | null | undefined) => value?.trim() || 'default',
   ensureGatewayAgent,
   openGatewayAgent,
   captureNewChatSource: vi.fn(),
+  currentNewChatIntent: vi.fn(() => 0),
   refreshActiveProfile: vi.fn(async () => undefined),
   requestFreshSession: vi.fn()
 }))
@@ -72,6 +75,8 @@ beforeEach(() => {
   $selectedStoredSessionId.set(null)
   $defaultProfileRoute.set(null)
   $showAllProfiles.set(false)
+  $newChatProfile.set(null)
+  $newChatRoute.set(null)
   ensureGatewayAgent.mockClear()
   openGatewayAgent.mockClear()
   getProfiles.mockReset()

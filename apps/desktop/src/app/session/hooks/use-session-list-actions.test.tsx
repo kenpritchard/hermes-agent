@@ -172,7 +172,11 @@ describe('background refreshes across gateway owners', () => {
     const { result } = renderHook(() => useSessionListActions({ profileScope: 'office-evals-windows' }))
 
     await act(async () => {
-      await Promise.all([result.current.refreshSessions(), result.current.refreshCronJobs(), result.current.refreshMessagingSessions()])
+      await Promise.all([
+        result.current.refreshSessions(),
+        result.current.refreshCronJobs(),
+        result.current.refreshMessagingSessions()
+      ])
     })
 
     expect(listSidebarSessions).not.toHaveBeenCalled()

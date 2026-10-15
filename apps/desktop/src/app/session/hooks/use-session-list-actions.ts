@@ -18,7 +18,13 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
-import { $profilesByConnection, messagingTotalsKey, normalizeProfileKey, profilesForConnection, sidebarProfileForScope } from '@/store/profile'
+import {
+  $profilesByConnection,
+  messagingTotalsKey,
+  normalizeProfileKey,
+  profilesForConnection,
+  sidebarProfileForScope
+} from '@/store/profile'
 import {
   $messagingSessions,
   $selectedStoredSessionId,

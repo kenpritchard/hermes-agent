@@ -47,9 +47,7 @@ describe('backend action helpers are profile-scoped', () => {
 
     void getProfiles({ connectionId: 'localhost-9119' })
 
-    expect(api).toHaveBeenCalledWith(
-      expect.objectContaining({ connectionId: 'localhost-9119', path: '/api/profiles' })
-    )
+    expect(api).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'localhost-9119', path: '/api/profiles' }))
     expect(lastProfile()).toBeUndefined()
   })
 
