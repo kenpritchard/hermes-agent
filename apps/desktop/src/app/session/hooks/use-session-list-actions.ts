@@ -100,10 +100,12 @@ function profileIsAbsentOnSelectedRemote(profile: string): boolean {
   return Boolean(remote && !remote.some(item => normalizeProfileKey(item.name) === profile))
 }
 
-// The roster may not be loaded at the first sidebar/cron refresh. Resolve an
-// unknown remote roster before querying a profile that might be local-only.
-// profilesForConnection single-flights concurrent callers; failed reads get another
-// chance on the next normal refresh rather than leaking a foreign-profile 404.
+function canPublishProfile(shouldPublish: () => boolean, currentProfile: string, expectedProfile: string): boolean {
+  return shouldPublish() && currentProfile === expectedProfile && !profileIsAbsentOnSelectedRemote(expectedProfile)
+}
+
+// Resolve an unknown remote roster before querying a potentially local-only
+// profile. Failed reads retry on the next refresh, not as foreign-profile 404s.
 function canReadProfileOnSelectedConnection(profile: string): boolean | Promise<boolean> {
   const connectionId = getApiRequestConnection()
 
@@ -391,11 +393,11 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       const sessionProfile = sidebarProfileForScope(profileScope)
       const readable = canReadProfileOnSelectedConnection(sessionProfile)
 
-      if (readable === false || (readable !== true && !(await readable))) {
+      if (readable !== true && !(await readable)) {
         return
       }
 
-      if (!shouldPublish() || sidebarProfileForScope(profileScopeRef.current) !== sessionProfile) {
+      if (!canPublishProfile(shouldPublish, sidebarProfileForScope(profileScopeRef.current), sessionProfile)) {
         return
       }
 
@@ -413,10 +415,8 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       }
 
       const owns = () =>
-        shouldPublish() &&
         refreshSessionsRequestRef.current === requestId &&
-        sidebarProfileForScope(profileScopeRef.current) === sessionProfile &&
-        !profileIsAbsentOnSelectedRemote(sessionProfile)
+        canPublishProfile(shouldPublish, sidebarProfileForScope(profileScopeRef.current), sessionProfile)
 
       // Snapshot the removal lifecycle BEFORE the first read: a page read
       // pre-archive-commit can land post-prune, and only the generation
